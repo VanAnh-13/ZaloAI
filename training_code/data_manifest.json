@@ -1,0 +1,14 @@
+{
+  "training_performed": false,
+  "data_generation_performed": false,
+  "base_models": [
+    {
+      "name": "Qwen3-14B",
+      "source": "https://huggingface.co/Qwen/Qwen3-14B",
+      "revision": "<commit hash>",
+      "license": "Apache-2.0",
+      "used_for": "inference (packaged in /code/models/Qwen3-14B)"
+    }
+  ],
+  "files": []
+}

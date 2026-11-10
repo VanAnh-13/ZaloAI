@@ -1,0 +1,13 @@
+# Keep models/ and training_code/ in the build context: both must be inside the image.
+.git
+.venv
+.pytest_cache
+**/__pycache__
+**/*.pyc
+runs
+out
+ws
+*.tar
+*.tar.gz
+*.md5
+.env

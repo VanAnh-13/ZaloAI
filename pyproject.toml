@@ -1,0 +1,35 @@
+[project]
+name = "datamate"
+version = "0.1.0"
+description = "DataMate agent — Zalo AI Challenge 2026 (Vietnamese QA over messy tabular data)"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    # pandas 2.x: LLM-generated code assumes pre-3.0 semantics (no copy-on-write by default).
+    "pandas>=2.2,<3",
+    "openpyxl>=3.1",
+    "python-calamine>=0.2",
+    "rapidfuzz>=3.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# prompt prose: one instruction per line reads better than wrapped text
+"datamate/agent/prompts.py" = ["E501"]
+"datamate/dm/__init__.py" = ["E501"]

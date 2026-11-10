@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+runs/
+out/
+*.log
+
+# Model weights and build artifacts (never commit)
+models/
+*.tar
+*.tar.gz
+*.md5
+
+# Local workspaces / caches produced by ingest
+ws/
+.env
+.kiro
