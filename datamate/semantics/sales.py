@@ -60,6 +60,17 @@ _ADJUSTMENT = re.compile(
 _SERVICE_FEE = re.compile(r"phi phuc vu|phi dich vu|service")
 ITEM, SERVICE_FEE, ADJUSTMENT = "item", "service_fee", "adjustment"
 
+# dimensions a question can filter or group on: where the value lives
+LINE_DIMS = ("product", "product_group", "unit")
+ORDER_DIMS = ("customer", "customer_group", "channel", "payment", "staff")
+TIME_DIMS = ("day", "month", "weekday", "hour")
+_CODE_OF = {"product": "product_code", "customer": "customer_code"}
+MEASURES = ("revenue", "qty", "base_qty", "orders")
+
+
+class QueryError(ValueError):
+    """A filter or dimension that the sales model cannot serve (message is shown to the model)."""
+
 
 @dataclass
 class SalesView:
@@ -67,6 +78,7 @@ class SalesView:
     orders: pd.DataFrame
     sources: dict[str, str] = field(default_factory=dict)  # role -> "table.column"
     notes: list[str] = field(default_factory=list)
+    per_line: bool = True  # False: one row per invoice, no item lines (no product filters)
 
     # ---- rulebook §1 ---------------------------------------------------
     def orders_in(self, period: Period | None = None) -> pd.DataFrame:
@@ -113,6 +125,192 @@ class SalesView:
         d = self.orders["date"].dropna()
         return (d.min().date(), d.max().date()) if len(d) else None
 
+    def qty(self, period: Period | None = None, base: bool = False) -> float:
+        """Quantity sold: item lines of the valid orders placed in the period (returns excluded).
+        base=True sums the quantity converted to the base unit (column base_qty)."""
+        col = "base_qty" if base else "qty"
+        L = self.valid_lines(period)
+        if col not in L:
+            raise QueryError(f"S.lines không có cột `{col}`")
+        return float(pd.to_numeric(L[col], errors="coerce").sum())
+
+    # ---- filters, ranking, name lookup ---------------------------------
+    def dims(self) -> dict[str, list[str]]:
+        """Dimensions available for where()/rank() -> their distinct values (as written in the data)."""
+        out: dict[str, list[str]] = {}
+        for d in LINE_DIMS:
+            if self.per_line and d in self.lines and self.lines[d].notna().any():
+                out[d] = _distinct(self.lines.loc[self.lines["kind"] == ITEM, d])
+        for d in ORDER_DIMS:
+            if d in self.orders and self.orders[d].notna().any():
+                out[d] = _distinct(self.orders[d])
+        if "customer" not in out and "customer_code" in self.orders and self.orders["customer_code"].notna().any():
+            out["customer"] = _distinct(self.orders["customer_code"])
+        return out
+
+    def find(self, dim: str, text: str, k: int = 5) -> list[tuple[str, float]]:
+        """Values of a dimension that look like `text` (accent-insensitive, typo-tolerant), best first."""
+        from datamate.core.text import find as fuzzy
+
+        values = self.dims().get(dim)
+        if values is None:
+            raise QueryError(f"không có chiều {dim!r}; các chiều có sẵn: {', '.join(self.dims()) or '(không có)'}")
+        return fuzzy(values, text, k=k)
+
+    def where(self, **filters) -> "SalesView":
+        """Sales model restricted to some products / customers / channels…; every metric then works on
+        the restricted model:  S.where(product="Bia Tiger lon", channel="Shopee").revenue(p)
+
+        Keys: product, product_group, unit (item lines) · customer, customer_group, channel, payment,
+        staff (orders) · walk_in=True/False. A value is matched exactly but ignoring accents and case;
+        a list means "any of". An unknown value raises QueryError with the closest names instead of
+        silently returning 0."""
+        o_mask = pd.Series(True, index=self.orders.index)
+        l_mask = pd.Series(True, index=self.lines.index)
+        line_filter = False
+        for dim, want in filters.items():
+            if want is None:
+                continue
+            if dim == "walk_in":
+                o_mask &= self.orders["walk_in"] == bool(want)
+                continue
+            if dim in LINE_DIMS:
+                if not self.per_line:
+                    raise QueryError(f"dữ liệu bán hàng không có dòng hàng nên không lọc được theo {dim!r}")
+                l_mask &= self._match(self.lines, dim, want)
+                line_filter = True
+            elif dim in ORDER_DIMS:
+                o_mask &= self._match(self.orders, dim, want)
+            else:
+                raise QueryError(
+                    f"không lọc được theo {dim!r}; dùng một trong: {', '.join(LINE_DIMS + ORDER_DIMS)}, walk_in"
+                )
+        orders = self.orders[o_mask]
+        lines = self.lines[l_mask & self.lines["order_id"].isin(orders["order_id"])]
+        if line_filter:  # an order belongs to the selection through its matching lines only
+            kept = lines[~lines["is_return"] & (lines["kind"] != ADJUSTMENT)]
+            revenue = kept.groupby("order_id", sort=False)["amount"].sum()
+            orders = orders[orders["order_id"].isin(lines["order_id"])].copy()
+            orders["revenue"] = orders["order_id"].map(revenue).fillna(0.0)
+            orders["n_lines"] = orders["order_id"].map(lines.groupby("order_id", sort=False).size()).fillna(0)
+        note = "Đã lọc: " + ", ".join(f"{k}={v!r}" for k, v in filters.items() if v is not None)
+        return SalesView(
+            lines.reset_index(drop=True),
+            orders.reset_index(drop=True),
+            self.sources,
+            self.notes + [note],
+            self.per_line,
+        )
+
+    def _match(self, df: pd.DataFrame, dim: str, want) -> pd.Series:
+        cols = [c for c in (dim, _CODE_OF.get(dim)) if c and c in df and df[c].notna().any()]
+        if not cols:
+            have = ", ".join(self.dims()) or "(không có)"
+            raise QueryError(f"dữ liệu bán hàng không có {dim!r}; các chiều có sẵn: {have}")
+        wants = {key(w) for w in (want if isinstance(want, (list, tuple, set)) else [want])}
+        mask = pd.Series(False, index=df.index)
+        for c in cols:  # the name or its code
+            mask |= df[c].map(lambda v: _text_key(v) in wants)
+        if not mask.any():
+            from datamate.core.text import find as fuzzy
+
+            values = _distinct(df[cols[0]])
+            near = [n for w in wants for n, _ in fuzzy(values, w, k=3)]
+            raise QueryError(
+                f"không có {dim} nào tên {sorted(wants)} trong dữ liệu bán hàng"
+                + (f"; gần giống: {list(dict.fromkeys(near))[:5]}" if near else "")
+            )
+        return mask
+
+    def rank(
+        self,
+        by: str,
+        measure: str = "revenue",
+        period: Period | None = None,
+        k: int | None = None,
+        ascending: bool = False,
+    ) -> pd.DataFrame:
+        """Ranking by the rulebook: valid orders placed in the period, `measure` descending (ascending=True
+        for "ít nhất"), equal values ordered by code (by name when there is no code) ascending.
+
+        by: product | product_group | customer | customer_group | channel | payment | staff | day | month |
+        weekday | hour.  measure: revenue | qty | base_qty | orders.
+        Returns a DataFrame [by, code (if any), measure]; names are written as in the data. Walk-in
+        customers are left out of a customer ranking. `.attrs["tie_at_boundary"]` is True when rank k and
+        k+1 are equal — the organizers removed such questions, so it usually means a wrong computation."""
+        if measure not in MEASURES:
+            raise QueryError(f"measure phải là một trong {MEASURES}, nhận {measure!r}")
+        orders = self.valid_orders(period)
+        lines = self.valid_lines(period)
+        if by in LINE_DIMS:
+            if not self.per_line or by not in lines:
+                raise QueryError(f"dữ liệu bán hàng không có {by!r} theo dòng hàng")
+            frame, amount = lines, "amount"
+        elif by in ORDER_DIMS + TIME_DIMS:
+            frame, amount = orders, "revenue"
+            if by in ORDER_DIMS and by not in orders and by != "customer":  # customers also exist as codes
+                raise QueryError(f"dữ liệu bán hàng không có {by!r}")
+        else:
+            raise QueryError(f"không xếp hạng được theo {by!r}; dùng: {', '.join(LINE_DIMS + ORDER_DIMS + TIME_DIMS)}")
+        frame = frame.copy()
+        code_col = _CODE_OF.get(by)
+        has_code = bool(code_col) and code_col in frame and frame[code_col].notna().any()
+        if by == "customer":  # §3: one code (or one normalized name) = one customer; walk-ins are nobody
+            frame = frame[frame["customer_key"].notna()]
+            frame["_g"] = frame["customer_key"]
+        elif by in TIME_DIMS:
+            stamp = frame["datetime"] if by == "hour" and "datetime" in frame else frame["date"]
+            if by == "hour" and "datetime" not in frame:
+                raise QueryError("dữ liệu bán hàng không ghi giờ")
+            frame = frame[stamp.notna()]
+            stamp = stamp[stamp.notna()]
+            frame["_g"] = {
+                "day": lambda s: s.dt.strftime("%Y-%m-%d"),
+                "month": lambda s: s.dt.strftime("%Y-%m"),
+                "weekday": lambda s: s.dt.weekday,
+                "hour": lambda s: s.dt.hour,
+            }[by](stamp)
+        elif has_code:
+            frame["_g"] = _ids(frame[code_col]).fillna(frame[by].map(_text_key))
+        else:
+            frame["_g"] = frame[by].map(_text_key)
+        frame = frame[frame["_g"].notna() & (frame["_g"] != "")]
+        g = frame.groupby("_g", sort=False)
+        if measure == "revenue":
+            val = g[amount].sum()
+        elif measure == "orders":
+            val = g["order_id"].nunique()
+        else:  # qty / base_qty live on the lines
+            if measure not in self.lines:
+                raise QueryError(f"S.lines không có cột `{measure}`")
+            src = frame
+            if by not in LINE_DIMS:  # group of each line = group of its order
+                src = lines.assign(_g=lines["order_id"].map(frame.set_index("order_id")["_g"]))
+                src = src[src["_g"].notna()]
+            val = pd.to_numeric(src[measure], errors="coerce").groupby(src["_g"], sort=False).sum()
+        out = pd.DataFrame({"_g": val.index, measure: val.values})
+        if by in TIME_DIMS:
+            from datamate.core.periods import VN_WEEKDAYS
+
+            out[by] = out["_g"].map(lambda v: VN_WEEKDAYS[int(v)]) if by == "weekday" else out["_g"]
+            keys = ["_g"]
+        else:
+            first = g.first()
+            out[by] = out["_g"].map(first[by]) if by in first else out["_g"]
+            keys = [by]
+            if has_code:
+                out["code"] = out["_g"].map(_ids(first[code_col]) if code_col in first else first[by])
+                keys = ["code", by]
+            out["_name_key"] = out[by].map(_text_key)
+            keys = [c if c != by else "_name_key" for c in keys]
+        out = out.sort_values([measure] + keys, ascending=[ascending] + [True] * len(keys), kind="mergesort")
+        out = out.reset_index(drop=True)
+        tie = bool(k is not None and len(out) > k and out[measure].iloc[k - 1] == out[measure].iloc[k])
+        cols = [by] + (["code"] if "code" in out else []) + [measure]
+        out = (out.head(k) if k is not None else out)[cols]
+        out.attrs["tie_at_boundary"] = tie
+        return out
+
 
 # ---------------------------------------------------------------- building
 
@@ -132,6 +330,21 @@ def _ids(s: pd.Series) -> pd.Series:
 
 def _name_key(v):
     return key(v) if isinstance(v, str) and v.strip() else np.nan
+
+
+def _text_key(v) -> str:
+    """Comparison key of a cell: '' for blanks, 1001.0 -> '1001', 'Bia  Tiger' -> 'bia tiger'."""
+    if v is None or (isinstance(v, float) and v != v):
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return key(v)
+
+
+def _distinct(s: pd.Series) -> list[str]:
+    """Distinct non-blank values as text, most frequent first (stable)."""
+    vc = s.dropna().map(lambda v: str(int(v)) if isinstance(v, float) and v.is_integer() else str(v).strip())
+    return [v for v in vc.value_counts(sort=True).index if v]
 
 
 def _has_time(s: pd.Series) -> bool:
@@ -203,7 +416,7 @@ class _Builder:
         for c in ("customer_key", "walk_in"):
             L[c] = L["order_id"].map(orders.set_index("order_id")[c])
         self._summary(orders)
-        return SalesView(L.reset_index(drop=True), orders, self.sources, self.notes)
+        return SalesView(L.reset_index(drop=True), orders, self.sources, self.notes, self.per_line)
 
     # -- columns -------------------------------------------------------
     def _datetime(self, t: Table, L: pd.DataFrame) -> None:
@@ -265,10 +478,13 @@ class _Builder:
             self.notes.append(f"Ghép bảng đơn T[{name!r}] theo mã đơn để lấy: {', '.join(joined)}.")
 
     def _join_groups(self, L: pd.DataFrame) -> None:
-        """customer_group from a customer list, product_group from a product list."""
+        """customer_group from a customer list, product_group from a product list; and the names
+        themselves when the sales table only carries codes."""
         for group, keys in (
             ("customer_group", ("customer_code", "customer")),
             ("product_group", ("product_code", "product")),
+            ("customer", ("customer_code",)),
+            ("product", ("product_code",)),
         ):
             if group in L:
                 continue
@@ -283,7 +499,9 @@ class _Builder:
                 dst = _ids(L[k]) if k.endswith("code") else L[k].map(_name_key)
                 keep = src.notna() & ~src.duplicated()
                 mapped = dst.map(pd.Series(df.loc[keep, r[group]].values, index=src[keep].values))
-                if mapped.notna().mean() >= 0.5:
+                # a name is joined for the rows that have a code (walk-ins have none); groups as before
+                base = dst.notna().mean() if group in ("customer", "product") else 1.0
+                if base and mapped.notna().mean() >= 0.5 * base:
                     L[group] = mapped
                     self.sources[group] = f"{name}.{r[group]} (nối theo {k})"
                     break

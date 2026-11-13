@@ -2,7 +2,7 @@ import pytest
 
 from datamate.agent.answer import AnswerError, canonical, normalize
 from datamate.agent.loop import extract_code
-from datamate.agent.solver import vote
+from datamate.agent.solver import Vote, agreed, tally
 
 
 @pytest.mark.parametrize(
@@ -58,12 +58,15 @@ def test_extract_code():
     assert extract_code("không có code") is None
 
 
-def test_vote():
+def test_votes_are_counted_by_how_the_answer_scores():
     a = {"type": "string", "answer": "Bia Tiger"}
     b = {"type": "string", "answer": "BIA TIGER!"}  # scores the same -> same vote
     c = {"type": "number", "answer": 3}
     assert canonical(a) == canonical(b)
-    assert vote([a], 0.5) == (a, 1.0)
-    assert vote([a, c], 0.5)[0] == {"type": "abstain"}  # tie
-    assert vote([a, b, c], 0.5)[0] == a
-    assert vote([None, None], 0.5)[0] == {"type": "abstain"}
+    V = lambda src, ans: Vote(src, ans)  # noqa: E731
+    assert tally([V("template", a), V("code", c), V("code", b)]) == [(a, 2), (c, 1)]
+    assert agreed([V("plan", a), V("code", b)]) == a
+    assert agreed([V("plan", a), V("code", c)]) is None  # one vote each
+    assert agreed([V("plan", a)]) is None and agreed([V("plan", a)], need=1) == a  # effort "fast"
+    assert agreed([V("plan", a), V("code", c)], need=1) is None  # a tie never wins
+    assert agreed([]) is None and tally([]) == []

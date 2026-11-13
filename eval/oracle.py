@@ -1,103 +1,39 @@
-"""Check the sales model (SalesView) and period parsing against train answers.
+"""Check stage 1 of the cascade (templates + query engine + sales model + period rules) against
+the train answers. No LLM involved.
 
     python -m eval.oracle --train C:/Users/Admin/Downloads/train/train [--ws runs/ws] [--show 20]
 
-Only "plain" questions are used: once period words and filler words are removed, nothing
-may remain (no product, customer or group filter). For those, the answer is computed
-deterministically from S and compared with answers.jsonl. A mismatch points at a bug in
-ingest, the sales model or the period helpers — no LLM involved.
+This runs exactly what the pipeline runs for a plain question (agent/templates.py →
+agent/query.py), so the table below is the measured precision of the answers that cost no LLM
+call. A mismatch points at a bug in ingest, the sales model, the period helpers or a template.
+Keep every row at 100 % before trusting effort "fast".
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from collections import Counter, defaultdict
+from datetime import date
 from pathlib import Path
 
+from datamate.agent.query import QueryError, execute
+from datamate.agent.templates import resolve
 from datamate.config import load_settings
-from datamate.core.numbers import pct_change
-from datamate.core.periods import prev_period, same_days_prev_month, same_period_last_year, this_month
-from datamate.core.text import key
 from datamate.nlu.periods import extract
 from datamate.workspace import load_cached, prepare_many
 from eval.scorer import score_one
 
-_REVENUE = r"doanh thu|dthu|bao nhieu tien|may tien|nhieu tien|thu ve|thu duoc"
-_FILLER = set(
-    """
-cua hang shop quan tiem doanh thu dthu tong cong ban duoc dc ra bao nhieu nhiu bnhiu nhieu may tien la trong cho
-toi minh biet giup xem voi hoi nhe nha a the vay z ha khong ko k oi tinh so don bi huy ti ty le phan tram gia tri
-trung binh quan mot moi tren mang ve ngay nao cao nhat dat xet theo thay doi tang giam hay lien truoc thang nam quy
-hom nay qua tuan roi dem co da dang tat ca cac lai duoc luong hang ngay hnay hqua bua dat gi sao duoc nhe dum giup
-jum cko mk mik e anh chi em ban ah u uh chua hien thi lam on bn nhiu nhieu phan tram kia vua bang tron
-""".split()
-)
-_PERIOD_WORDS = re.compile(
-    r"\b(thang|th|t|quy|q)\s*\d{1,2}(\s*(/|-|nam)\s*\d{2,4})?|\b\d{1,2}/\d{1,2}/\d{4}|\b\d{1,3}\s*ngay\b|\d+"
-)
 
-
-def is_plain(s: str) -> bool:
-    rest = _PERIOD_WORDS.sub(" ", s)
-    return all(tok in _FILLER for tok in re.findall(r"[a-z]+", rest))
-
-
-def intent(s: str, raw: str) -> str | None:
-    """s: folded question without punctuation (core.text.key); raw: original text (for '%')."""
-    percent = "%" in raw or re.search(r"ti le|ty le|phan tram", s)
-    if re.search(r"\bhuy\b", s):
-        if percent:
-            return "cancel_rate"
-        if re.search(r"\b(bao nhieu|may|so|dem)\b", s):
-            return "cancel_count"
+def coverage_of(ref) -> tuple[date, date] | None:
+    """Same coverage the pipeline gives the engine: first order date .. last data date."""
+    if not ref.coverage:
         return None
-    if re.search(r"trung binh|binh quan", s) and re.search(r"\bdon\b", s):
-        return "avg_order"
-    if re.search(r"\bngay nao\b", s) and re.search(r"nhat", s):
-        return "best_day"
-    if re.search(r"truoc|so voi", s) and percent and re.search(_REVENUE, s):
-        return "pct_change"
-    if re.search(_REVENUE, s):
-        return "revenue"
-    if re.search(r"\bdon\b", s) and re.search(r"bao nhieu|may", s):
-        return "order_count"
-    return None
-
-
-def _base_period(s: str, periods: list):
-    """The period a percentage change is measured against."""
-    p = periods[0]
-    if re.search(r"cung ky nam (truoc|ngoai)", s):
-        return same_period_last_year(p)
-    if re.search(r"(lien|ngay) truoc|truoc do|thang truoc|ky truoc", s) or len(periods) < 2:
-        return same_days_prev_month(p.end) if p == this_month(p.end) else prev_period(p)
-    return periods[1]
-
-
-def compute(kind: str, S, periods: list, s: str) -> tuple[str, object] | None:
-    """(answer type, value) from the sales model, None if the question cannot be mapped."""
-    if not periods:
-        return None
-    p = periods[0]
-    if kind == "revenue":
-        return "number", S.revenue(p)
-    if kind == "order_count":
-        return "number", S.order_count(p)
-    if kind == "cancel_count":
-        return "number", S.cancelled_count(p)
-    if kind == "cancel_rate":
-        return "percent", S.cancel_rate(p)
-    if kind == "avg_order":
-        return "number", S.avg_order_value(p)
-    if kind == "best_day":
-        daily = S.daily_revenue(p)
-        return ("date", daily.idxmax().strftime("%Y-%m-%d")) if len(daily) else None
-    if kind == "pct_change":
-        return "percent", pct_change(S.revenue(p), S.revenue(_base_period(s, periods)))
-    return None
+    start, end = date.fromisoformat(ref.coverage[0]), date.fromisoformat(ref.coverage[1])
+    if ref.data_end:
+        end = max(end, date.fromisoformat(ref.data_end))
+    return start, end
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -123,25 +59,39 @@ def main(argv: list[str] | None = None) -> int:
     by_biz: dict[str, Counter] = defaultdict(Counter)
     misses = []
     for q in qs:
-        s = key(q["question"])
-        kind = intent(s, q["question"])
-        if kind is None or not is_plain(s):
+        hit = resolve(q["question"], extract(q["question"], q["as_of_date"], cal))
+        if hit is None:
             continue
+        kind, query = hit
         g = gold[q["id"]]
         S = sales.get(q["business_id"])
-        if S is None or g["type"] == "unanswerable":
+        if S is None:
             stats[kind]["skip"] += 1
             continue
-        res = compute(kind, S, extract(q["question"], q["as_of_date"], cal), s)
-        if res is None or res[1] is None:
-            stats[kind]["skip"] += 1
+        try:
+            answer = execute(query, S, coverage_of(refs[q["business_id"]])).answer
+        except QueryError:
+            stats[kind]["skip"] += 1  # the engine declines: the question goes on to the model
             continue
-        ok = score_one({"type": res[0], "answer": res[1]}, g) == 1
-        stats[kind]["ok" if ok else "wrong"] += 1
+        # periods outside the data are a rule of their own (§7): reported on a separate row
+        row = "ngoài dữ liệu" if answer["type"] == "unanswerable" else kind
+        ok = score_one(answer, g) == 1
+        stats[row]["ok" if ok else "wrong"] += 1
         by_biz[q["business_id"]]["ok" if ok else "wrong"] += 1
         if not ok:
-            misses.append((q["business_id"], kind, q["question"], q["as_of_date"], res[1], g["answer"]))
+            misses.append(
+                (
+                    q["business_id"],
+                    row,
+                    q["question"],
+                    q["as_of_date"],
+                    answer.get("answer", "unanswerable"),
+                    g.get("answer", g["type"]),
+                )
+            )
 
+    covered = sum(c["ok"] + c["wrong"] for c in stats.values())
+    print(f"{covered}/{len(qs)} câu ({covered / max(1, len(qs)):.1%}) được tầng 1 trả lời, không cần LLM\n")
     print(f"{'mẫu câu':<14} {'đúng':>6} {'sai':>6} {'bỏ qua':>7} {'tỉ lệ đúng':>11}")
     tot = Counter()
     for k in sorted(stats):

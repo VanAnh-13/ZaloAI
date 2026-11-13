@@ -37,17 +37,18 @@ def test_verifier_warnings():
 
 
 def test_calibrator():
-    assert Calibrator().keep({"vote_share": 0.0})  # no calibration file: keep everything
-    c = Calibrator(weights={"vote_share": 4.0, "warnings": -2.0}, bias=-2.0, threshold=0.5)
-    assert c.keep({"vote_share": 1.0, "warnings": 0})
-    assert not c.keep({"vote_share": 1.0, "warnings": 2})
+    assert Calibrator().keep({"votes": 0.0}) and not Calibrator().fitted  # no file: the solver's vote rule decides
+    c = Calibrator(weights={"votes": 2.0, "warnings": -2.0}, bias=-2.0, threshold=0.5)
+    assert c.fitted
+    assert c.keep({"votes": 2.0, "warnings": 0})
+    assert not c.keep({"votes": 2.0, "warnings": 2})
 
 
-def test_time_budget_drops_to_one_attempt_when_late():
+def test_time_budget_drops_to_fast_effort_when_late():
     b = TimeBudget(deadline=time.time() + 3600, total=100)
-    assert b.attempts(3) == 3
+    assert b.effort("balanced") == "balanced"
     b.start -= 600  # 5 questions took 10 minutes: 95 more cannot fit in the hour left
     for _ in range(5):
         b.record()
-    assert b.attempts(3) == 1
-    assert b.attempts(1) == 1
+    assert b.effort("balanced") == "fast"
+    assert b.effort("fast") == "fast"

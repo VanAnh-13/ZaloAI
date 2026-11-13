@@ -9,17 +9,20 @@ import time
 import traceback
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
 from datamate.agent.confidence import Calibrator
-from datamate.agent.sandbox import Sandbox
+from datamate.agent.examples import ExampleBank
+from datamate.agent.planner import shop_dimensions
+from datamate.agent.sandbox import Sandbox, SandboxConfig
 from datamate.agent.solver import Resources, Shop, solve
 from datamate.config import Settings
 from datamate.nlu.entities import EntityIndex
 from datamate.results import ResultWriter
-from datamate.workspace import prepare_many
+from datamate.workspace import load_cached, prepare_many
 
 
 def log(msg: str) -> None:
@@ -27,7 +30,7 @@ def log(msg: str) -> None:
 
 
 class TimeBudget:
-    """Drops to a single attempt per question when the run falls behind the deadline."""
+    """Drops to effort "fast" (first vote wins, one code attempt) when the run falls behind the deadline."""
 
     def __init__(self, deadline: float, total: int, margin_s: float = 300.0):
         self.deadline, self.total, self.margin = deadline, total, margin_s
@@ -39,13 +42,16 @@ class TimeBudget:
         with self._lock:
             self.done += 1
 
-    def attempts(self, configured: int) -> int:
+    def behind(self) -> bool:
         with self._lock:
             done = self.done
-        if configured <= 1 or done < 5:
-            return configured
+        if done < 5:
+            return False
         projected = (time.time() - self.start) / done * (self.total - done)
-        return configured if projected < self.deadline - time.time() - self.margin else 1
+        return projected >= self.deadline - time.time() - self.margin
+
+    def effort(self, configured: str) -> str:
+        return "fast" if configured != "fast" and self.behind() else configured
 
 
 class Pipeline:
@@ -72,22 +78,47 @@ class Pipeline:
         if cal_path.exists():
             cal = pd.read_csv(cal_path)
             cal["date"] = pd.to_datetime(cal["date"])
+        sandbox = Sandbox(
+            config=SandboxConfig(
+                timeout_s=self.s.exec_timeout_s,
+                guard=self.s.sandbox_guard,
+                mem_mb=self.s.sandbox_mem_mb,
+                # model code reads this shop's files only: not the answers, not the results, not other shops' caches
+                deny_read=(str(self.out_dir.resolve()), str(Path(self.s.ws_dir).resolve())),
+            )
+        )
+        examples = ExampleBank.load()
+        if len(examples):
+            log(f"{len(examples)} ví dụ mẫu (few-shot {self.s.few_shot}, holdout theo shop: {self.s.examples_holdout})")
         return Resources(
             self.client,
-            Sandbox(self.s.exec_timeout_s),
+            sandbox,
             self.s,
             rb.read_text(encoding="utf-8") if rb.exists() else "",
             str(cal_path) if cal is not None else None,
             cal,
             self.calibrator,
+            examples,
+            str(rb) if rb.exists() else None,
         )
 
     def _shops(self, biz_ids: list[str]) -> dict[str, Shop]:
         refs = prepare_many(self.data_dir, biz_ids, Path(self.s.ws_dir), self.s.ingest_workers)
+        shops = {}
         for b, r in refs.items():
             if r.error:
                 log(f"workspace lỗi {b}: {r.error.strip().splitlines()[-1]}")
-        return {b: Shop(r, EntityIndex(r.entities)) for b, r in refs.items()}
+            sales = None
+            if r.pickle and (self.s.use_templates or self.s.use_planner):
+                try:  # the query engine of stages 1–2 runs in this process; the tables stay in the pickle
+                    sales = load_cached(Path(r.pickle)).sales
+                except Exception as e:
+                    log(f"không nạp được mô hình bán hàng {b}: {e}")
+            cov = (date.fromisoformat(r.coverage[0]), date.fromisoformat(r.coverage[1])) if r.coverage else None
+            if cov and r.data_end:
+                cov = (cov[0], max(cov[1], date.fromisoformat(r.data_end)))
+            shops[b] = Shop(r, EntityIndex(r.entities), sales, shop_dimensions(sales, cov))
+        return shops
 
     def run(self, questions: list[dict], resume: bool = False) -> dict:
         questions = sorted(questions, key=lambda q: (q["business_id"], q["id"]))  # fixed order, shops grouped
@@ -106,7 +137,7 @@ class Pipeline:
             try:
                 if time.time() > self.deadline - 60:
                     raise TimeoutError("hết thời gian trước khi bắt đầu câu này")
-                rec, lg = solve(q, shops[q["business_id"]], res, self.deadline, budget.attempts(self.s.attempts))
+                rec, lg = solve(q, shops[q["business_id"]], res, self.deadline, budget.effort(self.s.effort))
             except Exception as e:  # one question never kills the run
                 rec = {"id": q["id"], "type": "abstain"}
                 lg = {
@@ -131,6 +162,7 @@ class Pipeline:
                 types[fut.result()["type"]] += 1
                 if i % 10 == 0 or i == len(futures):
                     log(f"{i}/{len(futures)} câu; {dict(types)}; {time.time() - self.t0:.0f}s")
+        totals = writer.totals
 
         for q in questions:  # anything not written is an explicit abstain
             if q["id"] not in writer.done:
@@ -148,10 +180,22 @@ class Pipeline:
             "questions": len(questions),
             "types": dict(types),
             "seconds": round(time.time() - self.t0, 1),
+            # where the time went: answered by which stage, LLM calls and seconds, sandbox seconds
+            "answered_by": dict(totals["answered_by"]),
+            "llm_calls": totals["llm_calls"],
+            "llm_cached_calls": totals["cached_calls"],
+            "llm_seconds": round(totals["llm_ms"] / 1000, 1),
+            "sandbox_seconds": round(totals["exec_ms"] / 1000, 1),
+            "completion_tokens": totals["completion_tokens"],
+            "prompt_tokens": totals["prompt_tokens"],
             "settings": {k: v for k, v in self.s.__dict__.items() if "key" not in k},
         }
         (self.out_dir / "run_summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        log(f"xong: {summary['types']} trong {summary['seconds']}s")
+        log(
+            f"xong: {summary['types']} trong {summary['seconds']}s; quyết định bởi {summary['answered_by']}; "
+            f"{summary['llm_calls']} lần gọi LLM ({summary['llm_cached_calls']} từ cache, {summary['llm_seconds']}s), "
+            f"sandbox {summary['sandbox_seconds']}s"
+        )
         return summary

@@ -101,5 +101,16 @@ Mô hình bán hàng `S` (có thể là None — xem schema card; đã áp luậ
   (chỉ có những cột tìm được trong dữ liệu)
 - S.orders_in(p) — mọi đơn đặt trong kỳ (mọi trạng thái); S.valid_orders(p); S.valid_lines(p) (dòng của đơn hợp lệ)
 - S.revenue(p) → int; S.order_count(p); S.cancelled_count(p); S.cancel_rate(p) → %; S.avg_order_value(p) → int;
-  S.daily_revenue(p) → Series doanh thu theo ngày. p=None nghĩa là toàn bộ dữ liệu.
+  S.daily_revenue(p) → Series doanh thu theo ngày; S.qty(p) → tổng số lượng bán (S.qty(p, base=True): quy về đơn vị
+  cơ bản). p=None nghĩa là toàn bộ dữ liệu.
+- S.where(product=…, product_group=…, customer=…, customer_group=…, channel=…, payment=…, staff=…, walk_in=…) → một
+  mô hình S đã lọc, dùng tiếp mọi hàm ở trên: S.where(product="Sting dâu 330ml", channel="Shopee").revenue(p).
+  So tên không phân biệt dấu/hoa thường (customer và product nhận cả mã); list = "một trong các tên". Tên không có
+  trong dữ liệu thì báo lỗi kèm tên gần giống (không âm thầm trả 0).
+- S.rank(by, measure="revenue", period=None, k=None, ascending=False) → DataFrame [by, code (nếu có mã), measure] đã
+  xếp hạng đúng luật (đơn hợp lệ; bằng nhau thì theo mã, không có mã thì theo tên, tăng dần; khách lẻ không vào bảng
+  xếp hạng khách). by: product | product_group | customer | customer_group | channel | payment | staff | day | month |
+  weekday | hour. measure: revenue | qty | base_qty | orders. Ví dụ top 3 mặt hàng bán chạy theo số lượng:
+  answer("list", S.rank("product", "qty", p, k=3)["product"]). r.attrs["tie_at_boundary"] = True thường là đang tính sai.
+- S.find(dim, "chữ trong câu hỏi") → [(tên đúng trong dữ liệu, điểm)]; S.dims() → {chiều: [các giá trị]}.
 """

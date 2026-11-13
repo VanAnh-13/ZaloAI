@@ -3,12 +3,13 @@ canonical sales model (SalesView) and rulebook ranking."""
 
 from datamate.semantics.ranking import top_k
 from datamate.semantics.roles import detect_roles
-from datamate.semantics.sales import SalesView, build_sales
+from datamate.semantics.sales import QueryError, SalesView, build_sales
 from datamate.semantics.status import CANCELLED, COMPLETED, RETURNED, SHIPPING, canonical_status
 
 __all__ = [
     "CANCELLED",
     "COMPLETED",
+    "QueryError",
     "RETURNED",
     "SHIPPING",
     "SalesView",

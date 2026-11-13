@@ -32,4 +32,5 @@ select = ["E", "F", "B", "I"]
 [tool.ruff.lint.per-file-ignores]
 # prompt prose: one instruction per line reads better than wrapped text
 "datamate/agent/prompts.py" = ["E501"]
+"datamate/agent/planner.py" = ["E501"]
 "datamate/dm/__init__.py" = ["E501"]

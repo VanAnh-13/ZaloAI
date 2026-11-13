@@ -34,7 +34,7 @@ Tổng tháng,,,,55000,
 """
 
 
-def test_mock_pipeline(tmp_path):
+def test_mock_pipeline(tmp_path, monkeypatch):
     split = tmp_path / "split"
     biz = split / "data" / "biz_t01"
     biz.mkdir(parents=True)
@@ -56,9 +56,10 @@ def test_mock_pipeline(tmp_path):
 
     sub = read_jsonl(out / "submission.jsonl")
     assert sorted(r["id"] for r in sub) == ["q1", "q2"]
+    # the mock model never answers, and one vote (the template stage on q1) is not enough to submit
     assert all(r["type"] == "abstain" for r in sub)
-    logs = read_jsonl(out / "logs" / "logs.jsonl")
-    for rec in logs:  # fields required by the Docker guide §3.3
+    logs = {rec["id"]: rec for rec in read_jsonl(out / "logs" / "logs.jsonl")}
+    for rec in logs.values():  # fields required by the Docker guide §3.3
         assert {"id", "answer", "elapsed_ms", "thinking", "code", "output"} <= rec.keys()
         assert isinstance(rec["elapsed_ms"], int) and rec["elapsed_ms"] >= 0
         assert rec["code"] and "T.items()" in rec["code"][0]
@@ -66,5 +67,19 @@ def test_mock_pipeline(tmp_path):
         # model: D1 = 30.000 + 10.000, the cancelled D2 does not count
         assert "ban_hang (3, " in rec["output"][0] and "2026-01-03" in rec["output"][0]
         assert "S.revenue: 40000" in rec["output"][0]
+    # stage 1 computed q1 without any model call; q2 names a product, so it is left to the model
+    assert logs["q1"]["votes"] == [{"source": "template", "answer": {"type": "number", "answer": 40000}}]
+    assert logs["q2"]["votes"] == []
     golds = {"q1": {"type": "number", "answer": 40000}, "q2": {"type": "number", "answer": 2}}
     assert evaluate({r["id"]: r for r in sub}, golds, ["q1", "q2"])["pa"] == 0.0
+
+    # effort "fast": the first vote wins, so the plain question is answered with zero LLM calls
+    fast = tmp_path / "fast"
+    monkeypatch.setenv("DATAMATE_EFFORT", "fast")
+    assert run_main(["--data", str(split), "--out", str(fast), "--ws", str(tmp_path / "ws"), "--mock"]) == 0
+    sub = {r["id"]: r for r in read_jsonl(fast / "submission.jsonl")}
+    assert sub["q1"] == {"id": "q1", "type": "number", "answer": 40000} and sub["q2"]["type"] == "abstain"
+    flog = {rec["id"]: rec for rec in read_jsonl(fast / "logs" / "logs.jsonl")}
+    assert flog["q1"]["timing"].get("llm_calls", 0) == 0 and flog["q1"]["code"] is None
+    summary = json.loads((fast / "run_summary.json").read_text(encoding="utf-8"))
+    assert summary["answered_by"] == {"template": 1, "abstain": 1}
