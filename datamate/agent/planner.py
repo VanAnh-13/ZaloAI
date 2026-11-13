@@ -36,7 +36,8 @@ metric:
 op:
 - "value": một con số — metric trong `period`
 - "change": % thay đổi của metric ở `period` so với `base` (giảm ra số âm). `base` là "prev" (kỳ liền trước tương ứng: tháng trước, quý trước, tuần trước; "tháng này" thì so cùng số ngày của tháng trước), "last_year" (cùng kỳ năm trước) hoặc một kỳ cụ thể {"start": ..., "end": ...}
-- "top": xếp hạng các giá trị của `by` theo metric (revenue | orders | qty | base_qty) và lấy `k` cái đầu; "order" là "desc" (nhiều nhất/cao nhất) hoặc "asc" (ít nhất/thấp nhất). k = 1 khi hỏi "… nào … nhất"
+- "share": tỉ trọng % — metric (revenue | orders | qty | base_qty) của phần được lọc bằng `filters` chia cho metric của CẢ shop trong cùng `period` ("nhóm X chiếm bao nhiêu % doanh thu", "đơn bán qua kênh Y bằng bao nhiêu % tổng doanh thu")
+- "top": xếp hạng các giá trị của `by` theo metric (revenue | orders | qty | base_qty) và lấy `k` cái đầu; "order" là "desc" (nhiều nhất/cao nhất) hoặc "asc" (ít nhất/thấp nhất). k = 1 khi hỏi "… nào … nhất". Chọn metric theo RULEBOOK: "bán chạy / bán nhiều nhất / hot nhất" là theo số lượng quy về đơn vị cơ bản → "base_qty"; khách "mua nhiều tiền / chi tiêu nhiều nhất" → "revenue"
 - "best_day": ngày có metric (revenue | orders | qty) cao nhất trong `period`
 
 by (chỉ cho "top"): product, product_group, customer, customer_group, channel, payment, staff — chỉ những chiều có trong mục "Các chiều của shop" — hoặc day, month ("tháng nào doanh thu cao nhất" → by "month", k 1).
@@ -218,6 +219,7 @@ _TYPE_OF_OP = {
     "change": ("percent",),
     "best_day": ("date",),
     "top": ("string", "list", "date"),
+    "share": ("percent",),
     "value": ("number", "percent"),
 }
 

@@ -70,10 +70,11 @@ QUESTIONS = [
     ("q1", "doanh thu tháng 7/2025 là bao nhiêu", {"type": "number", "answer": 135000}),
     (
         "q2",
-        "top 2 mặt hàng bán chạy nhất tháng 7/2025",
+        # worded so that stage 1 does not take them: the planner and the code agent have to
+        "top 2 mặt hàng bán chạy nhất tháng 7/2025 xét theo số lượng",
         {"type": "list", "answer": ["Sting dâu 330ml", "Bia Tiger lon"]},
     ),
-    ("q3", "Bia Tiger lon tháng 7/2025 bán được mấy lon", {"type": "number", "answer": 3}),
+    ("q3", "Bia Tiger lon tháng 7/2025 bán được mấy lon, không tính đơn huỷ", {"type": "number", "answer": 3}),
     ("q4", "khách nào còn nợ nhiều nhất", {"type": "unanswerable"}),
     ("q5", "doanh thu tháng 3/2024 là bao nhiêu", {"type": "unanswerable"}),
 ]

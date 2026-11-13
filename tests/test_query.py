@@ -7,7 +7,6 @@ import pytest
 from datamate import dm
 from datamate.agent import planner, templates
 from datamate.agent.query import Query, QueryError, execute
-from datamate.nlu.periods import extract
 
 JULY, AUG = dm.month(7, 2025), dm.month(8, 2025)
 COVERAGE = (date(2025, 7, 1), date(2025, 8, 31))
@@ -86,6 +85,14 @@ def test_engine_operations(mini_ws):
     assert run(op="best_day", metric="revenue", period=JULY) == {"type": "date", "answer": "2025-07-15"}
     assert run(op="top", metric="revenue", by="month", k=1) == {"type": "date", "answer": "2025-07"}  # "tháng nào"
     assert run(op="top", metric="revenue", by="day", k=2)["type"] == "list"
+    assert run(op="top", metric="base_qty", period=JULY, by="product", k=1, as_list=True)["answer"] == [
+        "Sting dâu 330ml"
+    ]
+    # share of a selection in the revenue of the whole shop (§1)
+    assert run(op="share", metric="revenue", period=JULY, filters={"channel": "Shopee"}) == {
+        "type": "percent",
+        "answer": 29.63,
+    }
 
 
 def test_engine_declines_or_says_unanswerable(mini_ws):
@@ -112,39 +119,84 @@ def test_engine_declines_or_says_unanswerable(mini_ws):
 
 
 @pytest.mark.parametrize(
-    "question, as_of, expected",
+    "question, expected",
     [
-        ("doanh thu tháng 7/2025 là bao nhiêu", "2025-08-31", {"type": "number", "answer": 135000}),
-        ("dthu th7/2025 bnhiu z", "2025-08-31", {"type": "number", "answer": 135000}),
-        ("tháng 7/2025 có bao nhiêu đơn bị huỷ", "2025-08-31", {"type": "number", "answer": 1}),
-        ("tỉ lệ huỷ đơn tháng 7/2025 là bao nhiêu %", "2025-08-31", {"type": "percent", "answer": 25.0}),
-        ("tháng 7/2025 ngày nào doanh thu cao nhất", "2025-08-31", {"type": "date", "answer": "2025-07-15"}),
-        (
-            "doanh thu tháng 8/2025 thay đổi bao nhiêu % so với tháng trước",
-            "2025-08-31",
-            {"type": "percent", "answer": -55.56},
-        ),
-        ("doanh thu tháng 3/2024 là bao nhiêu", "2025-08-31", {"type": "unanswerable"}),
+        ("doanh thu tháng 7/2025 là bao nhiêu", {"type": "number", "answer": 135000}),
+        ("dthu th7/2025 bnhiu z", {"type": "number", "answer": 135000}),
+        ("check giùm toongr dthu thangs 7/2025 laf bn", {"type": "number", "answer": 135000}),  # Telex slips
+        ("tháng 7/2025 có bao nhiêu đơn bị huỷ", {"type": "number", "answer": 1}),
+        ("trong thang 7/2025 cua hang co may don o trang thai huy", {"type": "number", "answer": 1}),
+        ("tỉ lệ huỷ đơn tháng 7/2025 là bao nhiêu %", {"type": "percent", "answer": 25.0}),
+        ("tháng 7/2025 doanh thu bình quân mỗi bill là bnhiu", {"type": "number", "answer": 45000}),
+        ("số đơn quys 3/2025 là nhiêu", {"type": "number", "answer": 4}),  # "quys" = quý, not tháng 3
+        ("tháng 7/2025 ngày nào doanh thu cao nhất", {"type": "date", "answer": "2025-07-15"}),
+        ("doanh thu tháng 8/2025 thay đổi bao nhiêu % so với tháng trước", {"type": "percent", "answer": -55.56}),
+        ("doanh thu tháng 3/2024 là bao nhiêu", {"type": "unanswerable"}),
     ],
 )
-def test_template_stage_answers_plain_questions(mini_ws, question, as_of, expected):
-    hit = templates.resolve(question, extract(question, as_of, None))
+def test_template_stage_answers_plain_questions(mini_ws, question, expected):
+    hit = templates.resolve(question, "2025-08-31")
     assert hit is not None
     answer = execute(hit[1], mini_ws.sales, COVERAGE).answer
     assert {k: answer[k] for k in expected} == expected
 
 
 @pytest.mark.parametrize(
-    "question",
+    "question, family, expected",
     [
-        "Bia Tiger lon tháng 7/2025 bán được mấy lon",  # a product: not plain
-        "doanh thu kênh Shopee tháng 7/2025 là bao nhiêu",
-        "top 3 mặt hàng bán chạy nhất tháng 7/2025",
-        "doanh thu là bao nhiêu",  # no period
+        ("Doanh thu của Bia Tiger lon trong tháng 7 năm 2025 là bao nhiêu?", "product_revenue", 45000),
+        ("thang 7/2025 mat hang sting dau 330ml thu ve bn tien", "product_revenue", 40000),
+        ("Tiền bán Cà phê sữa (M) tháng 7/2025 là bao nhiêu?", "product_revenue", 50000),
+        ("Bia Tiger lon tháng 7/2025 bán được mấy lon", "product_qty", 3),
+        ("số chai Sting dâu 330ml bán được trong tháng 7/2025 là bao nhiêu", "product_qty", 4),
+        ("tháng 7/2025 doanh thu các đơn bán qua Shopee là bao nhiêu", "channel_revenue", 40000),
+        ("Doanh thu các đơn bán qua Shopee tháng 7/2025 chiếm bao nhiêu % tổng doanh thu?", "channel_share", 29.63),
+        ("top 2 mặt hàng bán chạy nhất tháng 7/2025", "top_products", ["Sting dâu 330ml", "Bia Tiger lon"]),
+        ("thang 7/2025 hang nao chay nhat", "top_products", "Sting dâu 330ml"),
+        ("liệt kê 1 mặt hàng hot nhất tháng 7/2025", "top_products", ["Sting dâu 330ml"]),
+        ("Tháng 7/2025 ai mua hàng nhiều tiền nhất?", "top_customers", "Anh Minh"),
+        ("Liệt kê 2 khách chi tiêu nhiều nhất trong tháng 7 năm 2025.", "top_customers", ["Anh Minh", "Chị Lan"]),
+        ("Khách nào mua nhiều đơn hàng nhất tháng 8/2025?", "customer_most_orders", "Chị Lan"),
     ],
 )
-def test_template_stage_leaves_everything_else_to_the_model(question):
-    assert templates.resolve(question, extract(question, "2025-08-31", None)) is None
+def test_template_stage_answers_questions_about_named_things(mini_ws, question, family, expected):
+    hit = templates.resolve(question, "2025-08-31", None, templates.Names(mini_ws.sales.dims()))
+    assert hit is not None and hit[0] == family
+    assert execute(hit[1], mini_ws.sales, COVERAGE).answer["answer"] == expected
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "doanh thu là bao nhiêu",  # no period
+        "Doanh thu của Bia Hà Nội trong tháng 7/2025 là bao nhiêu?",  # not a product of this shop
+        "tháng 7/2025 có bao nhiêu đơn có doanh thu từ 55.000 đồng trở lên",  # a threshold
+        "top 2 mặt hàng bán chạy nhất tháng 7/2025 theo doanh thu",  # the question redefines "bán chạy"
+        "top 2 mặt hàng bán chạy nhất trong các đơn bị huỷ tháng 7/2025",
+        "Bia Tiger lon tháng 7/2025 còn lại mấy lon trong kho",  # stock, not sales
+        "doanh thu Bia Tiger lon và Sting dâu 330ml tháng 7/2025",  # two names
+        "doanh thu Bia Tiger lon tháng 7/2025 so với tháng 6/2025",  # two periods
+        "tháng 7/2025 nhóm trà sữa chiếm bao nhiêu % doanh thu",  # no such group here
+        "Tháng 7/2025 khách nào mua nhiều đơn nhất và mua bao nhiêu tiền",
+        "tuần trước riêng ca chiều bán được bao nhiêu tiền",
+    ],
+)
+def test_template_stage_leaves_everything_else_to_the_model(mini_ws, question):
+    assert templates.resolve(question, "2025-08-31", None, templates.Names(mini_ws.sales.dims())) is None
+
+
+def test_names_are_linked_only_when_unambiguous():
+    names = templates.Names(
+        {"product": ["Trà đào (M)", "Sting dâu 330ml"], "product_group": ["Trà", "Lẻ"], "channel": ["Shopee"]}
+    )
+    assert names.mask("Doanh thu Sting dâu 330 ml tháng 7?") == (
+        "Doanh thu  zqz  tháng 7?",
+        {"product": "Sting dâu 330ml"},
+    )
+    assert names.mask("đơn bán qua shopee")[1] == {"channel": "Shopee"}  # not a Telex slip of "shope"
+    assert names.mask("nhóm trà bán được")[1] == {"product_group": "Trà"}  # short name, after its cue word
+    assert names.mask("tỉ lệ huỷ, trả hàng")[1] == {}  # "lẻ"/"trà" without accents are ordinary words here
+    assert names.mask("Trà đào (M) và Sting dâu 330ml") is None  # two products: not a simple filter
 
 
 def test_planner_spec_parsing():

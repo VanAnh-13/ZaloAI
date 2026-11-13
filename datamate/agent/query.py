@@ -16,11 +16,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 
-from datamate.core.numbers import pct_change, round2
+from datamate.core.numbers import pct, pct_change, round2
 from datamate.core.periods import DATA_START, Period
 from datamate.semantics.sales import LINE_DIMS, ORDER_DIMS, QueryError, SalesView
 
-OPS = ("value", "change", "top", "best_day")
+OPS = ("value", "change", "share", "top", "best_day")
 METRICS = ("revenue", "orders", "cancelled_orders", "cancel_rate", "avg_order_value", "qty", "base_qty")
 RANK_MEASURES = {"revenue": "revenue", "orders": "orders", "qty": "qty", "base_qty": "base_qty"}
 DIMS = LINE_DIMS + ORDER_DIMS
@@ -38,6 +38,7 @@ class Query:
     by: str | None = None  # op "top": dimension to rank
     k: int | None = None
     ascending: bool = False
+    as_list: bool = False  # op "top": answer with a list even when k == 1 ("liệt kê", "top 1")
 
     def describe(self) -> dict:
         return {
@@ -137,6 +138,17 @@ def execute(q: Query, S: SalesView | None, coverage: tuple[date, date] | None = 
             raise QueryError("kỳ so sánh bằng 0 hoặc không có đơn nên không tính được % thay đổi")
         return Result({"type": "percent", "answer": change}, ev)
 
+    if q.op == "share":
+        # §1: the share of a group is taken on the revenue of the WHOLE shop in the same period
+        if q.metric not in ("revenue", "orders", "qty", "base_qty") or not q.filters:
+            raise QueryError("op 'share' cần filters và metric revenue | orders | qty | base_qty")
+        part, whole = _metric(view, q.metric, q.period), _metric(S, q.metric, q.period)
+        ev["values"] = {"part": part, "whole": whole}
+        share = pct(part, whole)
+        if share is None:
+            raise QueryError("cả shop không có doanh thu trong kỳ nên không tính được tỉ trọng")
+        return Result({"type": "percent", "answer": share}, ev)
+
     if q.op == "top":
         if q.metric not in RANK_MEASURES:
             raise QueryError(f"không xếp hạng theo metric {q.metric!r}")
@@ -154,7 +166,7 @@ def execute(q: Query, S: SalesView | None, coverage: tuple[date, date] | None = 
         if len(ranked) < k:
             raise QueryError(f"chỉ có {len(ranked)} giá trị, không đủ top {k}")
         names = [str(x) for x in ranked[q.by].tolist()]
-        if k > 1:
+        if k > 1 or q.as_list:
             return Result({"type": "list", "answer": names}, ev)
         # "ngày nào / tháng nào … nhất" is a date answer: YYYY-MM-DD, or YYYY-MM for a month (§9)
         return Result({"type": "date" if q.by in ("day", "month") else "string", "answer": names[0]}, ev)

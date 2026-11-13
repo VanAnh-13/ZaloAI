@@ -19,6 +19,7 @@ from datamate.agent.examples import ExampleBank
 from datamate.agent.planner import shop_dimensions
 from datamate.agent.sandbox import Sandbox, SandboxConfig
 from datamate.agent.solver import Resources, Shop, solve
+from datamate.agent.templates import Names
 from datamate.config import Settings
 from datamate.nlu.entities import EntityIndex
 from datamate.results import ResultWriter
@@ -117,7 +118,8 @@ class Pipeline:
             cov = (date.fromisoformat(r.coverage[0]), date.fromisoformat(r.coverage[1])) if r.coverage else None
             if cov and r.data_end:
                 cov = (cov[0], max(cov[1], date.fromisoformat(r.data_end)))
-            shops[b] = Shop(r, EntityIndex(r.entities), sales, shop_dimensions(sales, cov))
+            names = Names(sales.dims()) if sales is not None else None
+            shops[b] = Shop(r, EntityIndex(r.entities), sales, shop_dimensions(sales, cov), names)
         return shops
 
     def run(self, questions: list[dict], resume: bool = False) -> dict:

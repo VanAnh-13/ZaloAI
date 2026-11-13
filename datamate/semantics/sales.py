@@ -79,6 +79,7 @@ class SalesView:
     sources: dict[str, str] = field(default_factory=dict)  # role -> "table.column"
     notes: list[str] = field(default_factory=list)
     per_line: bool = True  # False: one row per invoice, no item lines (no product filters)
+    _keys: dict = field(default_factory=dict, repr=False, compare=False)  # (frame, column, loose) -> key Series
 
     # ---- rulebook §1 ---------------------------------------------------
     def orders_in(self, period: Period | None = None) -> pd.DataFrame:
@@ -202,15 +203,26 @@ class SalesView:
             self.per_line,
         )
 
+    def _keyed(self, df: pd.DataFrame, col: str, loose: bool) -> pd.Series:
+        """Comparison keys of a column, computed once per view (the frames have 100k+ rows)."""
+        which = "lines" if df is self.lines else "orders"
+        k = (which, col, loose)
+        if k not in self._keys:
+            uniq = {v: (_loose_key if loose else _text_key)(v) for v in df[col].dropna().unique()}
+            self._keys[k] = df[col].map(uniq).fillna("")
+        return self._keys[k]
+
     def _match(self, df: pd.DataFrame, dim: str, want) -> pd.Series:
         cols = [c for c in (dim, _CODE_OF.get(dim)) if c and c in df and df[c].notna().any()]
         if not cols:
             have = ", ".join(self.dims()) or "(không có)"
             raise QueryError(f"dữ liệu bán hàng không có {dim!r}; các chiều có sẵn: {have}")
-        wants = {key(w) for w in (want if isinstance(want, (list, tuple, set)) else [want])}
+        loose = dim == "product"
+        norm = _loose_key if loose else _text_key
+        wants = {norm(w) for w in (want if isinstance(want, (list, tuple, set)) else [want])}
         mask = pd.Series(False, index=df.index)
         for c in cols:  # the name or its code
-            mask |= df[c].map(lambda v: _text_key(v) in wants)
+            mask |= self._keyed(df, c, loose).isin(wants)
         if not mask.any():
             from datamate.core.text import find as fuzzy
 
@@ -220,6 +232,12 @@ class SalesView:
                 f"không có {dim} nào tên {sorted(wants)} trong dữ liệu bán hàng"
                 + (f"; gần giống: {list(dict.fromkeys(near))[:5]}" if near else "")
             )
+        code = _CODE_OF.get(dim)
+        if dim == "product" and code in cols:
+            # §8: names that denote the same thing are one thing, and a file with codes goes by the code —
+            # every spelling of the matched product ("Siro Tiffy chai 30ml", "SIRO TIFFY CHAI 30 ML") counts
+            code_keys = self._keyed(df, code, False)
+            mask |= code_keys.isin(set(code_keys[mask]) - {""})
         return mask
 
     def rank(
@@ -273,7 +291,7 @@ class SalesView:
         elif has_code:
             frame["_g"] = _ids(frame[code_col]).fillna(frame[by].map(_text_key))
         else:
-            frame["_g"] = frame[by].map(_text_key)
+            frame["_g"] = frame[by].map(_loose_key if by == "product" else _text_key)
         frame = frame[frame["_g"].notna() & (frame["_g"] != "")]
         g = frame.groupby("_g", sort=False)
         if measure == "revenue":
@@ -339,6 +357,11 @@ def _text_key(v) -> str:
     if isinstance(v, float) and v.is_integer():
         v = int(v)
     return key(v)
+
+
+def _loose_key(v) -> str:
+    """Product names: also ignore spacing, so "chai 30 ml" and "chai 30ml" are one product (§8)."""
+    return _text_key(v).replace(" ", "")
 
 
 def _distinct(s: pd.Series) -> list[str]:
@@ -408,6 +431,7 @@ class _Builder:
         if header:
             self._join_header(header, L)
         self._join_groups(L)
+        self._base_quantity(L)
         self._amount(L)
         self._line_kinds(L)
         self._statuses(L)
@@ -505,6 +529,43 @@ class _Builder:
                     L[group] = mapped
                     self.sources[group] = f"{name}.{r[group]} (nối theo {k})"
                     break
+
+    def _base_quantity(self, L: pd.DataFrame) -> None:
+        """base_qty (quantity in the product's base unit, rulebook §3 "bán chạy") when the sales table
+        does not carry it: qty × the factor of (product, unit) from the shop's conversion list; a unit
+        without a conversion row is the base unit, factor 1 (rulebook §10)."""
+        if not self.per_line or "base_qty" in L or "qty" not in L:
+            return
+        key_col = "product_code" if "product_code" in L else "product" if "product" in L else None
+        if key_col is None:
+            return
+        conv, base_units, source = unit_conversions(self.biz, self.roles, by_code=key_col == "product_code")
+        if conv is None:
+            if "unit" not in L and not _mentions_conversion(self.biz):
+                # the shop counts everything in one unit per product: that unit is the base unit
+                L["base_qty"] = pd.to_numeric(L["qty"], errors="coerce")
+                self.sources["base_qty"] = f"{self.sources['qty']} (shop không ghi đơn vị, không có bảng quy đổi)"
+            return
+        if "unit" not in L:
+            return
+        prod = L[key_col].map(_text_key)
+        unit = L["unit"].map(_text_key)
+        factor = pd.Series(list(zip(prod, unit, strict=True)), index=L.index).map(conv)
+        # a listed product sold in a unit that is neither one of its big units nor its base unit cannot
+        # be converted: then do not offer base_qty at all rather than a wrong one
+        base = prod.map(base_units)
+        unknown = factor.isna() & base.notna() & (base != "") & (unit != "") & (unit != base)
+        if unknown.any():
+            self.notes.append(
+                f"Không suy được base_qty: {int(unknown.sum()):,} dòng bán theo đơn vị không có trong {source}."
+            )
+            return
+        L["base_qty"] = pd.to_numeric(L["qty"], errors="coerce") * factor.fillna(1.0)
+        self.sources["base_qty"] = f"qty × hệ số quy đổi ({source})"
+        self.notes.append(
+            f"base_qty = qty × hệ số quy đổi theo (mặt hàng, đơn vị) lấy từ {source}; đơn vị không có dòng quy "
+            f"đổi là đơn vị cơ bản (hệ số 1). {int(factor.notna().sum()):,} dòng bán theo đơn vị lớn."
+        )
 
     def _amount(self, L: pd.DataFrame) -> None:
         if not self.per_line:
@@ -652,6 +713,68 @@ class _Builder:
             f"S.orders: {len(o):,} đơn{span}; hợp lệ {int(o['valid'].sum()):,}; "
             + ", ".join(f"{s} {int(vc.get(s, 0)):,}" for s in (COMPLETED, SHIPPING, CANCELLED, RETURNED))
         )
+
+
+_FACTOR = re.compile(r"^he so so don vi co ban trong 1 don vi lon$|^he so quy doi$")
+_BIG_UNIT = re.compile(r"^don vi lon\b")
+_BASE_UNIT = re.compile(r"^don vi co ban$")
+
+
+def _mentions_conversion(biz: Business) -> bool:
+    """True when anything in the shop's files talks about unit conversion, in whatever form."""
+    if len(biz.units):
+        return True
+    rx = re.compile(r"quy doi|he so|don vi lon|don vi co ban|don vi goc")
+    return any(rx.search(key(c.desc)) or rx.search(key(c.name)) for t in biz.tables.values() for c in t.columns)
+
+
+def unit_conversions(biz: Business, roles: dict[str, dict[str, str]], by_code: bool = False):
+    """({(product, unit): factor}, {product: base unit}, source) from the shop's conversion list — keys are
+    comparison keys (_text_key) — or (None, None, None).
+
+    Only the plain form every train shop uses is read: one row per (product, big unit) with "số đơn vị
+    cơ bản trong 1 đơn vị lớn". Multi-level lists ("1 đơn vị lớn bằng bấy nhiêu đơn vị ngay dưới nó")
+    and free-text conversions are left to the model. The README list (`biz.units`) has the same shape."""
+    for name, t in biz.tables.items():
+        if t.df.empty:
+            continue
+        cols = {"factor": None, "big": None, "base": None}
+        for c in t.columns:
+            d = key(re.sub(r"\([^)]*\)", " ", c.desc).split(";")[0])
+            if c.kind == "number" and _FACTOR.search(d):
+                cols["factor"] = c.name
+            elif c.kind == "text" and _BIG_UNIT.search(d):
+                cols["big"] = c.name
+            elif c.kind == "text" and _BASE_UNIT.search(d):
+                cols["base"] = c.name
+        r = roles.get(name) or {}
+        pcol = r.get("product_code") if by_code else r.get("product")
+        if not (cols["factor"] and cols["big"] and pcol):
+            continue
+        df = t.df
+        bases = df[cols["base"]] if cols["base"] else [None] * len(df)
+        conv, base_units = {}, {}
+        for prod, unit, factor, base in zip(df[pcol], df[cols["big"]], df[cols["factor"]], bases, strict=True):
+            pk, uk = _text_key(prod), _text_key(unit)
+            if pk and uk and factor == factor and factor > 0:
+                if conv.get((pk, uk), factor) != factor:
+                    return None, None, None  # two factors for one (product, unit): not a plain list
+                conv[(pk, uk)] = float(factor)
+                if _text_key(base):
+                    base_units[pk] = _text_key(base)
+        if conv:
+            return conv, base_units, f"T[{name!r}]"
+    if not by_code and len(biz.units):
+        conv, base_units = {}, {}
+        for u in biz.units.itertuples():
+            pk, uk = _text_key(u.product), _text_key(u.unit)
+            if pk and uk and u.factor == u.factor and u.factor > 0:
+                conv[(pk, uk)] = float(u.factor)
+                if _text_key(u.base_unit):
+                    base_units[pk] = _text_key(u.base_unit)
+        if conv:
+            return conv, base_units, "README (UNITS)"
+    return None, None, None
 
 
 def build_sales(biz: Business) -> SalesView | None:

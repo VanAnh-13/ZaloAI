@@ -37,7 +37,6 @@ from datamate.agent.verify import check
 from datamate.config import Settings
 from datamate.core.periods import vn_weekday
 from datamate.nlu.entities import EntityIndex
-from datamate.nlu.periods import extract
 from datamate.semantics.sales import SalesView
 from datamate.workspace import WorkspaceRef
 
@@ -66,6 +65,7 @@ class Shop:
     index: EntityIndex
     sales: SalesView | None = None  # in-process copy for the query engine (stages 1 and 2)
     dimensions: str = ""  # planner view of the shop
+    names: templates.Names | None = None  # the shop's product / group / channel names, for stage 1
 
 
 @dataclass
@@ -128,8 +128,8 @@ def solve(q: dict, shop: Shop, res: Resources, deadline: float, effort: str | No
     if s.use_templates and shop.sales is not None:
         st = {"stage": TEMPLATE, "answer": None}
         try:
-            # the raw question, exactly as eval/oracle.py validates this stage against train
-            hit = templates.resolve(q["question"], extract(q["question"], q["as_of_date"], res.cal))
+            # exactly the call eval/oracle.py validates against the train answers
+            hit = templates.resolve(q["question"], q["as_of_date"], res.cal, shop.names)
             if hit:
                 kind, query = hit
                 st.update(intent=kind, query=query.describe())

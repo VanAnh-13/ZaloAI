@@ -19,9 +19,8 @@ from datetime import date
 from pathlib import Path
 
 from datamate.agent.query import QueryError, execute
-from datamate.agent.templates import resolve
+from datamate.agent.templates import Names, resolve
 from datamate.config import load_settings
-from datamate.nlu.periods import extract
 from datamate.workspace import load_cached, prepare_many
 from eval.scorer import score_one
 
@@ -52,19 +51,21 @@ def main(argv: list[str] | None = None) -> int:
     import pandas as pd
 
     cal = pd.read_csv(root / "calendar.csv")
+    cal["date"] = pd.to_datetime(cal["date"])  # as the pipeline loads it
     refs = prepare_many(root, sorted({q["business_id"] for q in qs}), Path(args.ws), args.workers)
     sales = {b: (load_cached(r.pickle).sales if r.pickle else None) for b, r in refs.items()}
+    names = {b: Names(S.dims()) for b, S in sales.items() if S is not None}
 
     stats: dict[str, Counter] = defaultdict(Counter)
     by_biz: dict[str, Counter] = defaultdict(Counter)
     misses = []
     for q in qs:
-        hit = resolve(q["question"], extract(q["question"], q["as_of_date"], cal))
+        S = sales.get(q["business_id"])
+        hit = resolve(q["question"], q["as_of_date"], cal, names.get(q["business_id"]))
         if hit is None:
             continue
         kind, query = hit
         g = gold[q["id"]]
-        S = sales.get(q["business_id"])
         if S is None:
             stats[kind]["skip"] += 1
             continue
