@@ -128,8 +128,10 @@ class Pipeline:
         log(f"{len(todo)} câu cần trả lời; chuẩn bị {len({q['business_id'] for q in todo})} shop…")
         shops = self._shops(sorted({q["business_id"] for q in todo}))
         log(f"workspace xong sau {time.time() - self.t0:.0f}s kể từ lúc bắt đầu")
-        if not self.client.wait_ready(max(0.0, min(900.0, self.deadline - time.time() - 600))):
-            log("LLM chưa sẵn sàng — câu nào gọi LLM thất bại sẽ abstain")
+        llm_up = self.client.wait_ready(max(0.0, min(900.0, self.deadline - time.time() - 600)))
+        if not llm_up:
+            # without a model only stage 1 can vote: take its answers rather than abstain on everything
+            log("LLM chưa sẵn sàng — chỉ tầng 1 (không cần LLM) trả lời được; các câu còn lại sẽ abstain")
         budget = TimeBudget(self.deadline, len(todo))
 
         def work(q: dict) -> dict:
@@ -137,7 +139,8 @@ class Pipeline:
             try:
                 if time.time() > self.deadline - 60:
                     raise TimeoutError("hết thời gian trước khi bắt đầu câu này")
-                rec, lg = solve(q, shops[q["business_id"]], res, self.deadline, budget.effort(self.s.effort))
+                effort = budget.effort(self.s.effort) if llm_up else "fast"
+                rec, lg = solve(q, shops[q["business_id"]], res, self.deadline, effort)
             except Exception as e:  # one question never kills the run
                 rec = {"id": q["id"], "type": "abstain"}
                 lg = {

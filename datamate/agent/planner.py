@@ -39,7 +39,7 @@ op:
 - "top": xếp hạng các giá trị của `by` theo metric (revenue | orders | qty | base_qty) và lấy `k` cái đầu; "order" là "desc" (nhiều nhất/cao nhất) hoặc "asc" (ít nhất/thấp nhất). k = 1 khi hỏi "… nào … nhất"
 - "best_day": ngày có metric (revenue | orders | qty) cao nhất trong `period`
 
-by (chỉ cho "top"): product, product_group, customer, customer_group, channel, payment, staff, day, month, weekday, hour — chỉ những chiều có trong mục "Các chiều của shop".
+by (chỉ cho "top"): product, product_group, customer, customer_group, channel, payment, staff — chỉ những chiều có trong mục "Các chiều của shop" — hoặc day, month ("tháng nào doanh thu cao nhất" → by "month", k 1).
 filters (tuỳ chọn): lọc theo tên, ví dụ {"product": "Sting dâu 330ml", "channel": "Shopee"}. Chép tên ĐÚNG NGUYÊN VĂN từ mục "Các chiều của shop" hoặc từ gợi ý; tên không có trong dữ liệu thì spec bị loại.
 period: {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}, gồm cả hai đầu. Ưu tiên chép từ "Kỳ thời gian nhận ra" trong gợi ý; tự tính theo RULEBOOK nếu gợi ý thiếu hoặc sai. null = toàn bộ dữ liệu.
 
@@ -75,8 +75,6 @@ def shop_dimensions(S: SalesView | None, coverage: tuple[date, date] | None) -> 
     lines.append("- metric theo số lượng dùng được: " + (", ".join(extras) if extras else "(không có cột số lượng)"))
     if not S.per_line:
         lines.append("- Dữ liệu chỉ có hoá đơn, không có dòng hàng: không lọc/xếp hạng theo product, không có qty.")
-    if "datetime" not in S.orders:
-        lines.append('- Không ghi giờ đặt đơn: không dùng by = "hour".')
     return "\n".join(lines)
 
 
@@ -216,7 +214,12 @@ class Plan:
     usage: dict | None = None
 
 
-_TYPE_OF_OP = {"change": ("percent",), "best_day": ("date",), "top": ("string", "list"), "value": ("number", "percent")}
+_TYPE_OF_OP = {
+    "change": ("percent",),
+    "best_day": ("date",),
+    "top": ("string", "list", "date"),
+    "value": ("number", "percent"),
+}
 
 
 def run_plan(

@@ -1,5 +1,9 @@
 # DataMate Agent — Kế hoạch triển khai (Zalo AI Challenge 2026)
 
+> **Cập nhật 13/11/2026:** luồng trả lời đã được thiết kế lại thành cascade ba tầng bỏ phiếu (template → planner →
+> code agent) với sandbox theo phiên; mô tả hiện hành ở [README.md](README.md). Các mục 3.4–3.6 dưới đây là kế hoạch
+> ban đầu, giữ lại để đối chiếu.
+
 > Lập ngày 07/11/2026. **Hạn nộp Docker: 16/11/2026 23:59 (GMT+7)**, tức còn khoảng 9 ngày.
 > Nguồn: trang đề (Description / Evaluation / Rule / Submission Guidance), Docker guideline PDF, và kết quả phân tích dữ liệu trong `Downloads/train`, `Downloads/public_test`.
 > Tab **Data** trên portal cần đăng nhập nên tôi chưa đọc được. Bạn nên đọc lại tab này xem có chi tiết nào không khớp với kế hoạch dưới đây.

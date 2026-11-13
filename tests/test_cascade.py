@@ -158,6 +158,11 @@ def test_fitted_calibration_replaces_the_two_votes_rule(mini_split, tmp_path):
     assert all(r["type"] == "abstain" for r in sub.values())
 
 
+def test_balanced_always_leaves_room_for_two_code_votes(mini_split, tmp_path):
+    sub, logs, _ = run(mini_split, tmp_path, use_templates=False, use_planner=False, attempts=1)
+    assert [v["source"] for v in logs["q3"]["votes"]] == ["code", "code"] and sub["q3"]["answer"] == 3
+
+
 def test_stages_can_be_switched_off(mini_split, tmp_path):
     sub, logs, client = run(mini_split, tmp_path, use_templates=False, use_planner=False)
     assert all(kind == "code" for _, kind in client.calls)
@@ -190,3 +195,48 @@ def test_worked_examples_are_shown_to_the_code_agent(mini_split, tmp_path):
         mini_split, tmp_path, "b", examples=ExampleBank(bank.examples[1:]), use_planner=False, examples_holdout=True
     )
     assert logs["q2"]["examples"] is None
+
+
+def test_eval_tools_read_the_cascade_logs(mini_split, tmp_path, capsys):
+    """oracle (stage 1 vs gold), report (per-stage precision and time), harvest (worked examples)."""
+    from eval import harvest, oracle, report
+
+    run(mini_split, tmp_path)
+    logs, gold = str(tmp_path / "out" / "logs" / "logs.jsonl"), str(mini_split / "answers.jsonl")
+    capsys.readouterr()
+
+    assert oracle.main(["--train", str(mini_split), "--ws", str(tmp_path / "ws")]) == 0
+    out = capsys.readouterr().out
+    assert "2/5 câu (40.0%) được tầng 1 trả lời" in out and "revenue" in out and "ngoài dữ liệu" in out
+    assert "shop có câu sai" not in out
+
+    failures = tmp_path / "failures.jsonl"
+    assert report.main(["--logs", logs, "--gold", gold, "--failures", str(failures)]) == 0
+    out = capsys.readouterr().out
+    assert "N=5  đúng=5  sai=0  bỏ=0  PA=1.0000" in out
+    assert "template" in out and "code (lượt 2)" in out  # precision of every voter
+    assert "2 phiếu [code+plan]" in out and "2 phiếu [plan+template]" in out and "có phiếu khác" in out
+    assert "2/5 câu (40.0%) xong mà không gọi LLM lần nào" not in out  # q1 and q5 still asked the planner
+    assert "0/5 câu (0.0%) xong mà không gọi LLM lần nào" in out
+    assert failures.read_text(encoding="utf-8").strip() == ""
+
+    out_file = tmp_path / "examples.jsonl"
+    args = ["--train", str(mini_split), "--logs", logs, "--out", str(out_file), "--ws", str(tmp_path / "ws")]
+    assert harvest.main(args) == 0
+    examples = {e["id"]: e for e in read_jsonl(out_file)}
+    assert sorted(examples) == ["q2", "q3", "q4"]  # q1 and q5 never needed a program
+    assert examples["q2"]["code"].count("\n\n") == 1 and "answer('list', r['product'])" in examples["q2"]["code"]
+    assert examples["q3"]["type"] == "number" and "sha256" in capsys.readouterr().out
+    assert len(ExampleBank.load(out_file)) == 3
+
+
+def test_report_explains_wrong_answers(mini_split, tmp_path, capsys):
+    from eval import report
+
+    run(mini_split, tmp_path, effort="fast")  # the planner's wrong reading of q3 is submitted
+    args = ["--logs", str(tmp_path / "out" / "logs" / "logs.jsonl"), "--gold", str(mini_split / "answers.jsonl")]
+    assert report.main(args) == 0
+    out = capsys.readouterr().out
+    assert "N=5  đúng=4  sai=1" in out and "số lệch lớn" in out
+    assert "Bia Tiger lon tháng 7/2025 bán được mấy lon" in out and "phiếu plan" in out
+    assert "2/5 câu (40.0%) xong mà không gọi LLM lần nào" in out

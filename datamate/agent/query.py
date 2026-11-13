@@ -142,6 +142,8 @@ def execute(q: Query, S: SalesView | None, coverage: tuple[date, date] | None = 
             raise QueryError(f"không xếp hạng theo metric {q.metric!r}")
         if not q.by:
             raise QueryError("op 'top' cần `by`")
+        if q.by in ("hour", "weekday"):  # how such an answer is written depends on the rulebook: leave it to the model
+            raise QueryError(f"xếp hạng theo {q.by!r} để agent viết code xử lý")
         k = int(q.k or 1)
         if k < 1 or k > 50:
             raise QueryError(f"k không hợp lệ: {q.k!r}")
@@ -152,7 +154,10 @@ def execute(q: Query, S: SalesView | None, coverage: tuple[date, date] | None = 
         if len(ranked) < k:
             raise QueryError(f"chỉ có {len(ranked)} giá trị, không đủ top {k}")
         names = [str(x) for x in ranked[q.by].tolist()]
-        return Result({"type": "string", "answer": names[0]} if k == 1 else {"type": "list", "answer": names}, ev)
+        if k > 1:
+            return Result({"type": "list", "answer": names}, ev)
+        # "ngày nào / tháng nào … nhất" is a date answer: YYYY-MM-DD, or YYYY-MM for a month (§9)
+        return Result({"type": "date" if q.by in ("day", "month") else "string", "answer": names[0]}, ev)
 
     # best_day
     if q.ascending:

@@ -7,6 +7,9 @@
 runs
 out
 ws
+# competition data must never end up in the image
+train
+public_test
 *.tar
 *.tar.gz
 *.md5

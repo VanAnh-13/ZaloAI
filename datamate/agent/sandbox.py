@@ -91,24 +91,34 @@ class _Worker:
         )
         self.replies: queue.Queue = queue.Queue()
         self.stderr_tail = b""
-        threading.Thread(target=self._read_stdout, daemon=True).start()
-        threading.Thread(target=self._read_stderr, daemon=True).start()
+        self._readers = [
+            threading.Thread(target=self._read_stdout, daemon=True),
+            threading.Thread(target=self._read_stderr, daemon=True),
+        ]
+        for t in self._readers:
+            t.start()
         self.ready: bool | None = None  # None = still loading
         self.start_error: str | None = None
         self.load_ms = 0
         self.send(init)
 
     def _read_stdout(self) -> None:
-        for line in self.proc.stdout:
-            try:
-                self.replies.put(json.loads(line.decode("utf-8")))
-            except ValueError:
-                continue
+        try:
+            for line in self.proc.stdout:
+                try:
+                    self.replies.put(json.loads(line.decode("utf-8")))
+                except ValueError:
+                    continue
+        except (OSError, ValueError):  # pipe closed under us while the worker is being killed
+            pass
         self.replies.put(_EOF)
 
     def _read_stderr(self) -> None:
-        for chunk in iter(lambda: self.proc.stderr.read(4096), b""):
-            self.stderr_tail = (self.stderr_tail + chunk)[-3000:]
+        try:
+            for chunk in iter(lambda: self.proc.stderr.read(4096), b""):
+                self.stderr_tail = (self.stderr_tail + chunk)[-3000:]
+        except (OSError, ValueError):
+            pass
 
     def send(self, obj: dict) -> bool:
         try:
@@ -156,6 +166,8 @@ class _Worker:
             self.proc.wait(timeout=5)
         except Exception:
             pass
+        for t in self._readers:  # they stop at end-of-file once the process is gone
+            t.join(timeout=2)
         for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             try:
                 stream.close()

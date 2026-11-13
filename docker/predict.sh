@@ -16,6 +16,9 @@ mkdir -p "$OUT_DIR/logs" "$OUT_DIR/system"
 export PYTHONPATH=/code/src
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONHASHSEED=0 PYTHONUTF8=1
 export DATAMATE_LLM_BASE_URL="http://127.0.0.1:${PORT}/v1" DATAMATE_LLM_MODEL="$SERVED_NAME" DATAMATE_WS="$WS_DIR"
+# answering flow: template -> planner -> code agent; an answer needs two agreeing votes, at most 3 code attempts
+export DATAMATE_EFFORT=balanced DATAMATE_ATTEMPTS=3 DATAMATE_TEMPLATES=1 DATAMATE_PLANNER=1 DATAMATE_THINKING=1
+unset DATAMATE_LLM_CACHE DATAMATE_EXAMPLES_HOLDOUT  # development-only switches never apply here
 
 echo "[predict.sh] start $(date -Is)"
 python3 -m vllm.entrypoints.openai.api_server \

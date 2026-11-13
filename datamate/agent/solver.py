@@ -197,7 +197,9 @@ def solve(q: dict, shop: Shop, res: Resources, deadline: float, effort: str | No
     def verify(ans: dict) -> list[str]:
         return check(ans, analysis, shop.index)
 
-    max_attempts = 1 if effort == "fast" else max(1, s.attempts)
+    # "balanced" needs room for two code votes: a question no cheap stage can answer would otherwise
+    # be given up without a single attempt (e.g. an old .env that still says DATAMATE_ATTEMPTS=1)
+    max_attempts = 1 if effort == "fast" else max(2, s.attempts)
 
     def reachable() -> bool:
         """False once even unanimous remaining attempts could not give any answer `need` votes."""

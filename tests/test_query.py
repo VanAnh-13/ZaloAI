@@ -84,6 +84,8 @@ def test_engine_operations(mini_ws):
     }
     assert run(op="top", metric="revenue", period=JULY, by="customer", k=1) == {"type": "string", "answer": "Anh Minh"}
     assert run(op="best_day", metric="revenue", period=JULY) == {"type": "date", "answer": "2025-07-15"}
+    assert run(op="top", metric="revenue", by="month", k=1) == {"type": "date", "answer": "2025-07"}  # "tháng nào"
+    assert run(op="top", metric="revenue", by="day", k=2)["type"] == "list"
 
 
 def test_engine_declines_or_says_unanswerable(mini_ws):
@@ -100,6 +102,7 @@ def test_engine_declines_or_says_unanswerable(mini_ws):
         Query("value", "revenue", JULY, filters={"product": "Bia Hà Nội"}),  # not in the data
         Query("value", "avg_order_value", dm.day(date(2025, 7, 20))),  # no order that day
         Query("top", "cancel_rate", JULY, by="product"),
+        Query("top", "revenue", JULY, by="weekday"),  # the written form of such an answer is the model's call
         Query("median", "revenue", JULY),
     ):
         with pytest.raises(QueryError):
