@@ -110,6 +110,9 @@ class ChatClient:
         reasoning = msg.get("reasoning_content") or msg.get("reasoning")
         if reasoning is None:
             content, reasoning = split_reasoning(content)
+        if not thinking and not content.strip() and reasoning:
+            # some reasoning parsers file the whole reply under "reasoning" when thinking is switched off
+            content, reasoning = reasoning, None
         return Reply(
             content,
             reasoning,

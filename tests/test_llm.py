@@ -29,6 +29,8 @@ def server():
             msg = {"content": f"trả lời {len(seen)}", "reasoning_content": "nghĩ"}
             if body["messages"][-1]["content"].startswith("inline"):
                 msg = {"content": "<think>nghĩ trong content</think>\nxong"}
+            if body["messages"][-1]["content"].startswith("misfiled"):
+                msg = {"content": None, "reasoning_content": '{"route": "code"}'}
             out = {"choices": [{"message": msg, "finish_reason": "stop"}], "usage": {"completion_tokens": 3}}
             data = json.dumps(out).encode()
             self.send_response(200)
@@ -57,6 +59,11 @@ def test_request_and_reply(server, monkeypatch):
     r = client.chat([{"role": "user", "content": "inline"}])  # server without a reasoning parser
     assert (r.content, r.reasoning) == ("xong", "nghĩ trong content")
     assert split_reasoning("không có think") == ("không có think", None)
+    # thinking off, but the server's reasoning parser put the reply under reasoning_content
+    r = client.chat([{"role": "user", "content": "misfiled"}], enable_thinking=False)
+    assert (r.content, r.reasoning) == ('{"route": "code"}', None)
+    r = client.chat([{"role": "user", "content": "misfiled"}])  # with thinking on it really is reasoning
+    assert (r.content, r.reasoning) == ("", '{"route": "code"}')
 
 
 def test_hosts_without_template_kwargs_get_the_soft_switch(server, monkeypatch):
